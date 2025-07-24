@@ -1,0 +1,29 @@
+start:
+  - /home/manish/projects/scott@work/int-hunter/src
+  - /home/manish/projects/scott@work/int-hunter/src/main/resources/META-INF/services
+types:
+  - .java
+  - .properties
+  - .xml
+  - .IExtractor
+exclude:
+  - target
+  - .git
+  - .idea
+  - node_modules
+  - resources
+  - public
+  - classes
+  - out
+  - .lein
+  - .m2
+  - .vscode
+  - .nrepl-port
+  - .shadow-cljs
+  - .shadow-cljs-history
+  - .shadow-cljs-npm
+  - .shadow-cljs-npm-deps
+  - src/vdocat.deleteme
+exclude_name_patterns:
+  - "*test*.*"  # This will match files with 'Test' in the name
+result: ./context-content.txt

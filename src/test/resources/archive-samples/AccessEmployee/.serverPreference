@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<server-preference>
+   <deployable factoryId="com.ibm.etools.server.j2ee.ear13"
+      memento="AccessEmployee" server="/Servers/was5Test.wsi"/>
+   <deployable factoryId="com.ibm.etools.server.j2ee.ear13"
+      memento="AccessEmployeeEAR" server="/Servers/was5Test.wsi"/>
+   <deployable factoryId="com.ibm.etools.server.j2ee.ear13"
+      memento="AccessEmpEAR" server="/Servers/was5Test.wsi"/>
+</server-preference>

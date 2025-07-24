@@ -1,0 +1,1011 @@
+/home/manish/projects/scott@work/int-hunter/src/main/java/org/madladlabs/classz/ClassFileLoader.java
+/home/manish/projects/scott@work/int-hunter/src/main/java/org/madladlabs/classz/engine/ScanEngine.java
+/home/manish/projects/scott@work/int-hunter/src/main/java/org/madladlabs/classz/reporting/IFindingWriter.java
+/home/manish/projects/scott@work/int-hunter/src/main/java/org/madladlabs/classz/reporting/ReportAggregator.java
+/home/manish/projects/scott@work/int-hunter/src/main/java/org/madladlabs/classz/spi/IExtractor.java
+/home/manish/projects/scott@work/int-hunter/src/main/java/org/madladlabs/classz/model/Finding.java
+/home/manish/projects/scott@work/int-hunter/src/main/java/org/madladlabs/classz/cli/IntHunterCLI.java
+/home/manish/projects/scott@work/int-hunter/src/main/java/org/madladlabs/classz/extractors/JdbcTemplateIntExtractor.java
+/home/manish/projects/scott@work/int-hunter/src/main/java/org/madladlabs/classz/extractors/HibernateIntFieldExtractor.java
+/home/manish/projects/scott@work/int-hunter/src/main/java/org/madladlabs/classz/extractors/PreparedStmtExtractor.java
+/home/manish/projects/scott@work/int-hunter/src/main/resources/META-INF/services/org.madladlabs.classz.spi.IExtractor
+
+
+------------------------------------------------------------------------------------------
+File Path: main/java/org/madladlabs/classz/ClassFileLoader.java
+File Content:
+package org.madladlabs.classz;
+
+import javassist.ClassPool;
+import javassist.CtClass;
+import javassist.NotFoundException;
+
+import java.nio.file.Path;
+
+public class ClassFileLoader {
+    private final Path bytecodeRoot;
+
+    public ClassFileLoader(Path bytecodeRoot) {
+        this.bytecodeRoot = bytecodeRoot;
+    }
+
+    public CtClass loadClass(String className) throws NotFoundException {
+        ClassPool pool = ClassPool.getDefault();
+        pool.insertClassPath(bytecodeRoot.toAbsolutePath().toString());
+        return pool.get(className);
+    }
+}
+
+------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------
+File Path: main/java/org/madladlabs/classz/engine/ScanEngine.java
+File Content:
+package org.madladlabs.classz.engine;
+
+import javassist.ClassPool;
+import javassist.CtClass;
+import org.madladlabs.classz.reporting.IFindingWriter;
+import org.madladlabs.classz.spi.IExtractor;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.ServiceLoader;
+import java.util.stream.Stream;
+
+public class ScanEngine {
+
+    private final IFindingWriter writer;
+    private final List<IExtractor> extractors = new ArrayList<>();
+
+    public ScanEngine(IFindingWriter writer) {
+        this.writer = writer;
+    }
+
+    public void loadExtractors() {
+        ServiceLoader.load(IExtractor.class).forEach(extractors::add);
+    }
+
+    public void scanDirectory(Path root) throws IOException {
+        try (Stream<Path> files = Files.walk(root)) {
+            files.filter(p -> p.toString().endsWith(".class"))
+                    .forEach(this::scanClassFile);
+        }
+    }
+
+    private void scanClassFile(Path classFile) {
+        try (InputStream in = Files.newInputStream(classFile)) {
+            CtClass ctClass = ClassPool.getDefault().makeClass(in);
+            for (IExtractor extractor : extractors) {
+                try {
+                    extractor.process(ctClass, writer);
+                } catch (Exception e) {
+                    System.err.println("Extractor " + extractor.name() + " failed on " + ctClass.getName());
+                    e.printStackTrace();
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to process class file: " + classFile);
+            e.printStackTrace();
+        }
+    }
+}
+
+------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------
+File Path: main/java/org/madladlabs/classz/reporting/IFindingWriter.java
+File Content:
+package org.madladlabs.classz.reporting;
+
+import org.madladlabs.classz.model.Finding;
+
+public interface IFindingWriter {
+    void accept(Finding finding);
+}
+
+------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------
+File Path: main/java/org/madladlabs/classz/reporting/ReportAggregator.java
+File Content:
+package org.madladlabs.classz.reporting;
+
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+import org.madladlabs.classz.model.Finding;
+
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
+public class ReportAggregator implements IFindingWriter {
+
+    private final Path outputPath;
+    private final List<Finding> findings = new ArrayList<>();
+
+    public ReportAggregator(Path outputPath) {
+        this.outputPath = outputPath;
+    }
+
+
+    @Override
+    public void accept(Finding f) {
+        findings.add(f);
+    }
+
+    public boolean flush() throws IOException {
+        findings.sort(Comparator.comparing(Finding::getClassName));
+
+        if (outputPath.toString().endsWith(".csv")) {
+            writeCsv();
+        } else {
+            System.err.println("Only CSV output supported in this version.");
+        }
+        return !findings.isEmpty();
+    }
+
+    // Add this at the bottom of the ReportAggregator class
+    public List<Finding> getFindingsList() {
+        return this.findings;
+    }
+
+    private void writeCsv() throws IOException {
+        CsvMapper mapper = new CsvMapper();
+        CsvSchema schema = mapper.schemaFor(Finding.class).withHeader();
+
+        try (BufferedWriter writer = Files.newBufferedWriter(outputPath)) {
+            mapper.writer(schema).writeValue(writer, findings);
+        }
+    }
+}
+
+------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------
+File Path: main/java/org/madladlabs/classz/spi/IExtractor.java
+File Content:
+package org.madladlabs.classz.spi;
+
+import javassist.CtClass;
+import org.madladlabs.classz.reporting.IFindingWriter;
+
+public interface IExtractor {
+    String name();
+    void process(CtClass ctClass, IFindingWriter writer) throws Exception;
+}
+
+------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------
+File Path: main/java/org/madladlabs/classz/model/Finding.java
+File Content:
+package org.madladlabs.classz.model;
+
+public class Finding {
+
+    private final String type;
+    private final String className;
+    private final String methodName;
+    private final int bytecodeLine;
+    private final String sqlSnippet;
+    private final Integer paramIndex;
+    private final String table;
+    private final String column;
+    private final String javaType;
+
+    public Finding(String type, String className, String methodName, int bytecodeLine,
+                   String sqlSnippet, Integer paramIndex, String table, String column, String javaType) {
+        this.type = type;
+        this.className = className;
+        this.methodName = methodName;
+        this.bytecodeLine = bytecodeLine;
+        this.sqlSnippet = sqlSnippet;
+        this.paramIndex = paramIndex;
+        this.table = table;
+        this.column = column;
+        this.javaType = javaType;
+    }
+
+    public String getType() {
+        return type;
+    }
+
+    public String getClassName() {
+        return className;
+    }
+
+    public String getMethodName() {
+        return methodName;
+    }
+
+    public int getBytecodeLine() {
+        return bytecodeLine;
+    }
+
+    public String getSqlSnippet() {
+        return sqlSnippet;
+    }
+
+    public Integer getParamIndex() {
+        return paramIndex;
+    }
+
+    public String getTable() {
+        return table;
+    }
+
+    public String getColumn() {
+        return column;
+    }
+
+    public String getJavaType() {
+        return javaType;
+    }
+
+    @Override
+    public String toString() {
+        return "Finding{" +
+                "type='" + type + '\'' +
+                ", className='" + className + '\'' +
+                ", methodName='" + methodName + '\'' +
+                ", bytecodeLine=" + bytecodeLine +
+                ", sqlSnippet='" + sqlSnippet + '\'' +
+                ", paramIndex=" + paramIndex +
+                ", table='" + table + '\'' +
+                ", column='" + column + '\'' +
+                ", javaType='" + javaType + '\'' +
+                '}';
+    }
+}
+
+------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------
+File Path: main/java/org/madladlabs/classz/cli/IntHunterCLI.java
+File Content:
+package org.madladlabs.classz.cli;
+
+import org.apache.commons.cli.*;
+import org.madladlabs.classz.engine.ScanEngine;
+import org.madladlabs.classz.reporting.ReportAggregator;
+
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+public class IntHunterCLI {
+    public static void main(String[] args) throws Exception {
+
+
+        Options options = new Options();
+
+        options.addOption(Option.builder()
+                .longOpt("classesDir")
+                .hasArg()
+                .desc("Root folder of .class files")
+                .required()
+                .build());
+
+        options.addOption(Option.builder()
+                .longOpt("out")
+                .hasArg()
+                .desc("Output file path (json|csv|html)")
+                .required(false)
+                .build());
+
+
+        CommandLineParser parser = new DefaultParser();
+        CommandLine cmd = parser.parse(options, args);
+
+        Path classDir = Paths.get(cmd.getOptionValue("classesDir"));
+        Path outFile = Paths.get(cmd.getOptionValue("out", "scan-report.json"));
+
+        ReportAggregator aggregator = new ReportAggregator(outFile);
+        ScanEngine engine = new ScanEngine(aggregator);
+        engine.loadExtractors();
+        engine.scanDirectory(classDir);
+        boolean found = aggregator.flush();
+
+        System.exit(found ? 1 : 0);
+    }
+}
+
+------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------
+File Path: main/java/org/madladlabs/classz/extractors/JdbcTemplateIntExtractor.java
+File Content:
+package org.madladlabs.classz.extractors;
+
+
+import javassist.CtClass;
+import javassist.CtMethod;
+import javassist.bytecode.*;
+import org.madladlabs.classz.model.Finding;
+import org.madladlabs.classz.reporting.IFindingWriter;
+import org.madladlabs.classz.spi.IExtractor;
+
+import java.util.Locale;
+
+/**
+ * Detects integer values passed to Spring's JdbcTemplate / NamedParameterJdbcTemplate update(...) methods.
+ *
+ * Strategy (single pass over the byte-code):
+ *   1. Remember SQL-looking string constants (for nicer reporting).
+ *   2. Record the bytecode offset of the most-recent Integer.valueOf(int) boxing call.
+ *   3. When we hit an INVOKE* of *.update(...):
+ *        – If that boxing call is "nearby" (<= BOXING_DISTANCE bytes back), we emit a Finding.
+ */
+public class JdbcTemplateIntExtractor implements IExtractor {
+
+    private static final int CONSTANT_String = 8;
+    private static final int BOXING_DISTANCE = 200; // bytes between Integer.valueOf and update call
+
+    private static final String JDBC_TEMPLATE =
+            "org.springframework.jdbc.core.JdbcTemplate";
+    private static final String NAMED_TEMPLATE =
+            "org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate";
+
+    @Override
+    public String name() {
+        return "JdbcTemplateInt";
+    }
+
+    @Override
+    public void process(CtClass ctClass, IFindingWriter writer) throws Exception {
+
+
+        /* >>> EARLY EXIT <<< */
+
+        if (earlyReturnIfNotSpring(ctClass)) {
+            System.out.println("Skipping " + ctClass.getName() +
+                    " – no Spring JdbcTemplate or NamedParameterJdbcTemplate references found.");
+            return;            // nothing Springy here – skip expensive work
+        }
+
+
+        for (CtMethod method : ctClass.getDeclaredMethods()) {
+            MethodInfo mi = method.getMethodInfo();
+            CodeAttribute ca = mi.getCodeAttribute();
+            if (ca == null) continue;
+
+            ConstPool cp   = mi.getConstPool();
+            CodeIterator it = ca.iterator();
+            LineNumberAttribute lines =
+                    (LineNumberAttribute) ca.getAttribute(LineNumberAttribute.tag);
+
+            String recentSql = null;     // last SQL literal encountered
+            int    lastBox   = -1;       // bytecode index of last Integer.valueOf(int)
+
+            while (it.hasNext()) {
+                int idx = it.next();
+                int op  = it.byteAt(idx);
+
+                /* --- Phase 1: capture SQL literals ---------------------------------------- */
+                if (op == Opcode.LDC || op == Opcode.LDC_W) {
+                    int cpIdx = (op == Opcode.LDC)
+                            ? it.byteAt(idx + 1)
+                            : it.u16bitAt(idx + 1);
+                    if (cp.getTag(cpIdx) == CONSTANT_String) {
+                        String s = cp.getStringInfo(cpIdx);
+                        if (looksLikeSql(s)) recentSql = s;
+                    }
+                }
+
+                /* --- Phase 2: detect Integer boxing --------------------------------------- */
+                if (op == Opcode.INVOKESTATIC) {
+                    int cpIdx  = it.u16bitAt(idx + 1);
+                    String cls = cp.getMethodrefClassName(cpIdx);
+                    String m   = cp.getMethodrefName(cpIdx);
+                    String sig = cp.getMethodrefType(cpIdx);
+
+                    if ("java.lang.Integer".equals(cls)
+                            && "valueOf".equals(m)
+                            && "(I)Ljava/lang/Integer;".equals(sig)) {
+                        lastBox = idx;          // remember where boxing happened
+                    }
+                }
+
+                /* --- Phase 3: look for *.update(...) ------------------------------------- */
+                if (op == Opcode.INVOKEVIRTUAL || op == Opcode.INVOKEINTERFACE) {
+                    int cpIdx;
+                    String cls;
+                    String m;
+
+                    if (op == Opcode.INVOKEVIRTUAL) {
+                        cpIdx = it.u16bitAt(idx + 1);
+                        cls   = cp.getMethodrefClassName(cpIdx);
+                        m     = cp.getMethodrefName(cpIdx);
+                    } else {
+                        cpIdx = it.u16bitAt(idx + 1);
+                        cls   = cp.getInterfaceMethodrefClassName(cpIdx);
+                        m     = cp.getInterfaceMethodrefName(cpIdx);
+                    }
+
+                    if ("update".equals(m) &&
+                            (JDBC_TEMPLATE.equals(cls)
+                                    || NAMED_TEMPLATE.equals(cls)
+                                    || cls.endsWith("JdbcTemplate"))) {
+
+                        boolean intSeen = lastBox != -1
+                                && (idx - lastBox) <= BOXING_DISTANCE;
+
+                        if (intSeen) {
+                            int line = (lines != null) ? lines.toLineNumber(idx) : -1;
+                            writer.accept(new Finding(
+                                    "JdbcTemplateInt",
+                                    ctClass.getName(),
+                                    method.getName(),
+                                    line,
+                                    recentSql != null ? cleanSql(recentSql) : null,
+                                    null, null, null, null
+                            ));
+                        }
+
+                        /* reset trackers for the next update call in the same method */
+                        recentSql = null;
+                        lastBox   = -1;
+                    }
+                }
+            }
+        }
+    }
+
+    /** @return true if the extractor should stop processing this class */
+    /**
+     * Returns true when the class does *not* reference JdbcTemplate / NamedParameterJdbcTemplate
+     * and we can safely skip byte-code analysis.
+     */
+    private boolean earlyReturnIfNotSpring(CtClass ctClass) {
+        ConstPool cp = ctClass.getClassFile().getConstPool();
+
+        for (int i = 1; i < cp.getSize(); i++) {
+            if (cp.getTag(i) == ConstPool.CONST_Class) {
+                // Constant-pool stores the internal form; make sure it’s dot-notation before comparing.
+                String internal = cp.getClassInfo(i);          // e.g. "org.springframework.jdbc.core.JdbcTemplate"
+                String dotName  = internal.replace('/', '.');  // just in case slash form appears
+
+                if (JDBC_TEMPLATE.equals(dotName) ||
+                        NAMED_TEMPLATE.equals(dotName) ||
+                        dotName.endsWith(".JdbcTemplate") ||
+                        dotName.endsWith(".NamedParameterJdbcTemplate")) {
+                    return false;              // relevant Spring reference found → KEEP processing
+                }
+            }
+        }
+        return true;                           // no match → skip this class
+    }
+
+
+
+    /* --------------------------------------------------------------------- */
+    private boolean looksLikeSql(String s) {
+        if (s == null || s.length() < 6) return false;
+        String l = s.trim().toLowerCase(Locale.ROOT);
+        return l.startsWith("select") || l.startsWith("insert")
+                || l.startsWith("update") || l.startsWith("delete")
+                || l.startsWith("merge")  || l.startsWith("call");
+    }
+
+    private String cleanSql(String sql) {
+        return sql.replaceAll("(?s)/\\*.*?\\*/", "")       // block comments
+                .replaceAll("--.*?(\\r?\\n|$)", "")      // line comments
+                .trim();
+    }
+}
+
+------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------
+File Path: main/java/org/madladlabs/classz/extractors/HibernateIntFieldExtractor.java
+File Content:
+package org.madladlabs.classz.extractors;
+
+import javassist.CtClass;
+import javassist.CtField;
+import javassist.Modifier;
+import javassist.bytecode.*;
+import javassist.bytecode.annotation.Annotation;
+import javassist.bytecode.annotation.MemberValue;
+import javassist.bytecode.annotation.StringMemberValue;
+import org.madladlabs.classz.model.Finding;
+import org.madladlabs.classz.reporting.IFindingWriter;
+import org.madladlabs.classz.spi.IExtractor;
+
+/**
+ * Detects primitive {@code int} and boxed {@code java.lang.Integer} fields on
+ * JPA entity classes, supporting both Java EE (javax.persistence.*) and
+ * Jakarta EE (jakarta.persistence.*) packages.
+ */
+public class HibernateIntFieldExtractor implements IExtractor {
+
+    /* ─────────────────────────────────────────────────────────────── */
+
+    // Fully qualified annotation names we care about
+    private static final String[] ENTITY_ANN  = {
+            "javax.persistence.Entity",   "jakarta.persistence.Entity"
+    };
+    private static final String[] TABLE_ANN   = {
+            "javax.persistence.Table",    "jakarta.persistence.Table"
+    };
+    private static final String[] COLUMN_ANN  = {
+            "javax.persistence.Column",   "jakarta.persistence.Column"
+    };
+
+    /* ─────────────────────────────────────────────────────────────── */
+
+    @Override
+    public String name() {
+        return "HibernateIntField";
+    }
+
+    @Override
+    public void process(CtClass ctClass, IFindingWriter writer) throws Exception {
+        if (!isAnnotatedWith(ctClass, ENTITY_ANN)) return;   // not an entity
+
+        String tableName = resolveTableName(ctClass);
+
+        for (CtField field : ctClass.getDeclaredFields()) {
+            if (isConstant(field)) continue;                 // skip static finals
+            if (!isIntLike(field)) continue;                 // only int/Integer
+
+            String columnName = resolveColumnName(field);
+            String javaType   = field.getType().getName();   // "int" or "java.lang.Integer"
+
+            writer.accept(new Finding(
+                    "HibernateIntField",
+                    ctClass.getName(),
+                    field.getName(),          // methodName slot repurposed for field
+                    -1,
+                    null, null,
+                    tableName,
+                    columnName,
+                    javaType
+            ));
+        }
+    }
+
+    /* ───────────────────────── helper methods ───────────────────── */
+
+    private boolean isAnnotatedWith(CtClass cc, String... fqcnCandidates) {
+        return getAnnotation(cc.getClassFile(), fqcnCandidates) != null;
+    }
+
+    private String resolveTableName(CtClass cc) {
+        Annotation a = getAnnotation(cc.getClassFile(), TABLE_ANN);
+        if (a == null) return null;
+        MemberValue mv = a.getMemberValue("name");
+        return (mv instanceof StringMemberValue)
+                ? ((StringMemberValue) mv).getValue()
+                : null;
+    }
+
+    private boolean isIntLike(CtField f) throws Exception {
+        String t = f.getType().getName();
+        return "int".equals(t) || "java.lang.Integer".equals(t);
+    }
+
+    private boolean isConstant(CtField f) {
+        int mod = f.getModifiers();
+        return Modifier.isStatic(mod) && Modifier.isFinal(mod);
+    }
+
+    private String resolveColumnName(CtField f) {
+        Annotation col = getAnnotation(f.getFieldInfo(), COLUMN_ANN);
+        if (col == null) return null;
+        MemberValue mv = col.getMemberValue("name");
+        return (mv instanceof StringMemberValue)
+                ? ((StringMemberValue) mv).getValue()
+                : null;
+    }
+
+    /* ───────────────────── generic annotation fetch ─────────────── */
+
+    private Annotation getAnnotation(AttributeInfo ai, String... fqcnCandidates) {
+        if (!(ai instanceof AnnotationsAttribute)) return null;
+        AnnotationsAttribute attr = (AnnotationsAttribute) ai;
+        for (String fqcn : fqcnCandidates) {
+            Annotation ann = attr.getAnnotation(fqcn);
+            if (ann != null) return ann;
+        }
+        return null;
+    }
+
+    private Annotation getAnnotation(FieldInfo fi, String... fqcnCandidates) {
+        AnnotationsAttribute vis =
+                (AnnotationsAttribute) fi.getAttribute(AnnotationsAttribute.visibleTag);
+        if (vis != null) {
+            Annotation ann = getAnnotation(vis, fqcnCandidates);
+            if (ann != null) return ann;
+        }
+        AnnotationsAttribute inv =
+                (AnnotationsAttribute) fi.getAttribute(AnnotationsAttribute.invisibleTag);
+        return inv == null ? null : getAnnotation(inv, fqcnCandidates);
+    }
+
+    private Annotation getAnnotation(ClassFile cf, String... fqcnCandidates) {
+        AnnotationsAttribute vis =
+                (AnnotationsAttribute) cf.getAttribute(AnnotationsAttribute.visibleTag);
+        if (vis != null) {
+            Annotation ann = getAnnotation(vis, fqcnCandidates);
+            if (ann != null) return ann;
+        }
+        AnnotationsAttribute inv =
+                (AnnotationsAttribute) cf.getAttribute(AnnotationsAttribute.invisibleTag);
+        return inv == null ? null : getAnnotation(inv, fqcnCandidates);
+    }
+}
+
+------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------
+File Path: main/java/org/madladlabs/classz/extractors/PreparedStmtExtractor.java
+File Content:
+package org.madladlabs.classz.extractors;
+
+import javassist.CtClass;
+import javassist.CtMethod;
+import javassist.bytecode.*;
+import org.madladlabs.classz.model.Finding;
+import org.madladlabs.classz.reporting.IFindingWriter;
+import org.madladlabs.classz.spi.IExtractor;
+
+import java.util.*;
+
+/**
+ * Extractor that detects the use of PreparedStatement setter methods (like setInt, setString, etc.)
+ * in Java bytecode. This is useful for identifying parameterized queries which are generally
+ * safer against SQL injection attacks.
+ *
+ * <h2>How it works:</h2>
+ * <ol>
+ *   <li>Scans bytecode for SQL string literals (INSERT, UPDATE, DELETE, SELECT, etc.)</li>
+ *   <li>Tracks when these SQL strings are passed to Connection.prepareStatement()</li>
+ *   <li>Monitors subsequent method calls to find setter invocations on the PreparedStatement</li>
+ *   <li>Reports findings when setter methods are detected for modifying SQL statements</li>
+ * </ol>
+ *
+ * <h2>Bytecode Analysis Strategy:</h2>
+ * <p>The extractor performs a two-phase scan:</p>
+ * <ul>
+ *   <li><b>Phase 1:</b> Detect SQL strings and prepareStatement calls</li>
+ *   <li><b>Phase 2:</b> Track PreparedStatement usage and setter method invocations</li>
+ * </ul>
+ *
+ * @author madladlabs
+ */
+public class PreparedStmtExtractor implements IExtractor {
+
+    /**
+     * Constant pool tag for String constants in Java bytecode
+     */
+    private static final int CONSTANT_String = 8;
+
+
+
+    @Override
+    public String name() {
+        return "PreparedStatement";
+    }
+
+    /**
+     * Processes a Java class to detect PreparedStatement setter usage.
+     *
+     * <h3>How setInt Detection Works:</h3>
+     *
+     * <p>Consider this Java code:</p>
+     * <pre>
+     * String sql = "INSERT INTO users (id, name) VALUES (?, ?)";
+     * PreparedStatement stmt = conn.prepareStatement(sql);
+     * stmt.setInt(1, userId);
+     * stmt.setString(2, userName);
+     * </pre>
+     *
+     * <p>This compiles to bytecode like:</p>
+     * <pre>
+     * LDC "INSERT INTO users (id, name) VALUES (?, ?)"  // Load SQL string
+     * ASTORE 2                                           // Store in local var 2
+     * ALOAD 1                                            // Load connection
+     * ALOAD 2                                            // Load SQL string
+     * INVOKEINTERFACE java/sql/Connection.prepareStatement
+     * ASTORE 3                                           // Store PreparedStatement in var 3
+     * ALOAD 3                                            // Load PreparedStatement
+     * ICONST_1                                           // Push parameter index 1
+     * ILOAD 4                                            // Load userId
+     * INVOKEVIRTUAL java/sql/PreparedStatement.setInt   // Call setInt
+     * </pre>
+     *
+     * <p>The detection algorithm:</p>
+     * <ol>
+     *   <li>When we see LDC with a SQL string, we remember it</li>
+     *   <li>When we see INVOKEINTERFACE/INVOKEVIRTUAL calling prepareStatement, we know
+     *       the SQL is being prepared</li>
+     *   <li>We track which local variable stores the PreparedStatement (via ASTORE)</li>
+     *   <li>We scan forward for INVOKEVIRTUAL calls to setInt, setString, etc.</li>
+     *   <li>When found, we create a Finding to report this usage</li>
+     * </ol>
+     *
+     * @param ctClass The Java class to analyze
+     * @param writer The writer to report findings to
+     * @throws Exception if bytecode analysis fails
+     */
+    @Override
+    public void process(CtClass ctClass, IFindingWriter writer) throws Exception {
+        System.out.println("Processing class: " + ctClass.getName());
+
+        if (earlyReturnIfNoJDBCPrepOrCallable(ctClass)) {
+            System.out.println("Skipping " + ctClass.getName() +
+                    " – no Prepared Statement or CallableStatement references found.");
+            return;            // nothing Springy here – skip expensive work
+        }
+
+        for (CtMethod method : ctClass.getDeclaredMethods()) {
+            System.out.println("  Method: " + method.getName());
+
+            MethodInfo methodInfo = method.getMethodInfo();
+            CodeAttribute codeAttr = methodInfo.getCodeAttribute();
+            if (codeAttr == null) {
+                System.out.println("    Skipped: No CodeAttribute.");
+                continue;
+            }
+
+            ConstPool constPool = methodInfo.getConstPool();
+            CodeIterator ci = codeAttr.iterator();
+            LineNumberAttribute lineAttr = (LineNumberAttribute) codeAttr.getAttribute(LineNumberAttribute.tag);
+
+            // Track the most recently seen SQL string
+            String recentSqlLiteral = null;
+
+            // Track which local variable holds the PreparedStatement
+            int preparedStmtVarIndex = -1;
+
+            while (ci.hasNext()) {
+                int index = ci.next();
+                int opcode = ci.byteAt(index);
+
+                // Phase 1: Detect SQL string constants
+                if (opcode == Opcode.LDC || opcode == Opcode.LDC_W) {
+                    int cpIndex = (opcode == Opcode.LDC) ? ci.byteAt(index + 1) : ci.u16bitAt(index + 1);
+                    if (constPool.getTag(cpIndex) == CONSTANT_String) {
+                        String str = constPool.getStringInfo(cpIndex);
+                        if (isSqlString(str)) {
+                            recentSqlLiteral = str;
+                            System.out.println("    Found SQL string: " + str);
+                        }
+                    }
+                }
+
+                // Phase 2: Detect Connection.prepareStatement call
+                if ((opcode == Opcode.INVOKEVIRTUAL || opcode == Opcode.INVOKEINTERFACE) && recentSqlLiteral != null) {
+                    int cpIndex = ci.u16bitAt(index + 1);
+
+                    String className = "";
+                    String methodName = "";
+
+                    // Extract class and method names based on invocation type
+                    if (opcode == Opcode.INVOKEVIRTUAL) {
+                        className = constPool.getMethodrefClassName(cpIndex);
+                        methodName = constPool.getMethodrefName(cpIndex);
+                    } else if (opcode == Opcode.INVOKEINTERFACE) {
+                        className = constPool.getInterfaceMethodrefClassName(cpIndex);
+                        methodName = constPool.getInterfaceMethodrefName(cpIndex);
+                    }
+
+                    System.out.println("    Checking method call: " + className + "." + methodName);
+
+                    // Check if this is a prepareStatement call
+                    if (methodName.equals("prepareStatement") &&
+                            (className.equals("java.sql.Connection") || className.endsWith("Connection"))) {
+
+                        String currentSql = recentSqlLiteral;
+                        System.out.println("    Matched prepareStatement with SQL: " + currentSql);
+
+                        // Track where the PreparedStatement is stored
+                        if (ci.hasNext()) {
+                            int nextIndex = ci.lookAhead();
+                            if (ci.byteAt(nextIndex) == Opcode.ASTORE) {
+                                preparedStmtVarIndex = ci.byteAt(nextIndex + 1);
+                                System.out.println("    PreparedStatement stored in local var: " + preparedStmtVarIndex);
+                            } else if (ci.byteAt(nextIndex) >= Opcode.ASTORE_0 &&
+                                    ci.byteAt(nextIndex) <= Opcode.ASTORE_3) {
+                                preparedStmtVarIndex = ci.byteAt(nextIndex) - Opcode.ASTORE_0;
+                                System.out.println("    PreparedStatement stored in local var: " + preparedStmtVarIndex);
+                            }
+                        }
+
+                        // Scan forward to find setter method calls
+                        scanForSetterMethods(codeAttr, constPool, index + 3, currentSql,
+                                preparedStmtVarIndex, lineAttr, ctClass, method, writer);
+
+                        // Reset for next potential prepareStatement
+                        recentSqlLiteral = null;
+                        preparedStmtVarIndex = -1;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Scans bytecode starting from a given position to find setter method invocations
+     * on a PreparedStatement object.
+     *
+     * @param codeAttr The code attribute containing the bytecode
+     * @param constPool The constant pool for resolving method references
+     * @param startPos The position to start scanning from
+     * @param sql The SQL statement being prepared
+     * @param preparedStmtVar The local variable index holding the PreparedStatement
+     * @param lineAttr Line number attribute for source line mapping
+     * @param ctClass The class being analyzed
+     * @param method The method being analyzed
+     * @param writer The findings writer
+     */
+    private void scanForSetterMethods(CodeAttribute codeAttr, ConstPool constPool, int startPos,
+                                      String sql, int preparedStmtVar, LineNumberAttribute lineAttr,
+                                      CtClass ctClass, CtMethod method, IFindingWriter writer) {
+        CodeIterator follow = codeAttr.iterator();
+        follow.move(startPos);
+        boolean foundSetter = false;
+
+        while (follow.hasNext()) {
+            try {
+                int lookaheadIndex = follow.next();
+                int op = follow.byteAt(lookaheadIndex);
+
+                // Check for method invocations
+                if ((op == Opcode.INVOKEVIRTUAL || op == Opcode.INVOKEINTERFACE)) {
+                    int cp = follow.u16bitAt(lookaheadIndex + 1);
+                    String cname = "";
+                    String mname = "";
+
+                    if (op == Opcode.INVOKEVIRTUAL) {
+                        cname = constPool.getMethodrefClassName(cp);
+                        mname = constPool.getMethodrefName(cp);
+                    } else {
+                        cname = constPool.getInterfaceMethodrefClassName(cp);
+                        mname = constPool.getInterfaceMethodrefName(cp);
+                    }
+
+                    System.out.println("      Checking method: " + cname + "." + mname);
+
+                    // Check if this is a setter method on PreparedStatement
+                    if (isPreparedStatementSetter(cname, mname)) {
+                        if (isModifyingStatement(sql)) {
+                            int lineNumber = (lineAttr != null) ? lineAttr.toLineNumber(lookaheadIndex) : -1;
+                            System.out.println("      Found setter: " + cname + "." + mname + " at line " + lineNumber);
+                            writer.accept(new Finding(
+                                    "PreparedStatement",
+                                    ctClass.getName(),
+                                    method.getName(),
+                                    lineNumber,
+                                    trimSql(sql),
+                                    null, null, null, null
+                            ));
+                            foundSetter = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Stop scanning at method exit points
+                if (isReturnOpcode(op)) {
+                    break;
+                }
+            } catch (Exception e) {
+                // Handle any bytecode reading errors
+                break;
+            }
+        }
+
+        if (!foundSetter) {
+            System.out.println("    No matching setter found after prepareStatement.");
+        }
+    }
+
+    /**
+     * Checks if a given class and method name combination represents a PreparedStatement
+     * setter method.
+     *
+     * @param className The fully qualified class name (using dots)
+     * @param methodName The method name
+     * @return true if this is a setter method we're interested in
+     */
+    private boolean isPreparedStatementSetter(String className, String methodName) {
+        return (className.equals("java.sql.PreparedStatement") ||
+                className.equals("java.sql.CallableStatement")) &&
+                (methodName.equals("setInt") || methodName.equals("setLong") ||
+                        methodName.equals("setString") || methodName.equals("setDouble") ||
+                        methodName.equals("setFloat") || methodName.equals("setBoolean") ||
+                        methodName.equals("setDate") || methodName.equals("setTimestamp") ||
+                        methodName.equals("setBigDecimal") || methodName.equals("setBytes") ||
+                        methodName.equals("setObject"));
+    }
+
+    /**
+     * Checks if an opcode represents a return instruction.
+     *
+     * @param opcode The bytecode opcode
+     * @return true if this is a return instruction
+     */
+    private boolean isReturnOpcode(int opcode) {
+        return opcode == Opcode.RETURN || opcode == Opcode.ARETURN ||
+                opcode == Opcode.IRETURN || opcode == Opcode.LRETURN ||
+                opcode == Opcode.FRETURN || opcode == Opcode.DRETURN;
+    }
+
+    /**
+     * Determines if a string is likely to be a SQL statement based on common SQL keywords.
+     *
+     * @param str The string to check
+     * @return true if the string appears to be SQL
+     */
+    private boolean isSqlString(String str) {
+        if (str == null || str.length() < 10) return false;
+        String lower = str.toLowerCase().trim();
+        return lower.startsWith("select") || lower.startsWith("insert") ||
+                lower.startsWith("update") || lower.startsWith("delete") ||
+                lower.startsWith("merge") || lower.startsWith("call");
+    }
+
+    /**
+     * Checks if a SQL statement is a data-modifying statement (INSERT, UPDATE, DELETE).
+     *
+     * @param sql The SQL statement
+     * @return true if this is a modifying statement
+     */
+    private boolean isModifyingStatement(String sql) {
+        String trimmed = trimSql(sql).toLowerCase(Locale.ROOT);
+        return trimmed.startsWith("insert") || trimmed.startsWith("update") || trimmed.startsWith("delete");
+    }
+
+    /**
+     * Removes comments and trims whitespace from a SQL statement.
+     *
+     * @param sql The SQL statement to clean
+     * @return The cleaned SQL statement
+     */
+    private String trimSql(String sql) {
+        return sql.replaceAll("(?s)/\\*.*?\\*/", "")  // Remove block comments
+                .replaceAll("--.*?(\r?\n|$)", "")     // Remove line comments
+                .trim();
+    }
+    private static final String JDBC_PREPARED = "java.sql.PreparedStatement";
+
+    private static final String JDBC_CALLATBLE =
+            "java.sql.CallableStatement";
+    private boolean earlyReturnIfNoJDBCPrepOrCallable(CtClass ctClass) {
+        ConstPool cp = ctClass.getClassFile().getConstPool();
+
+        for (int i = 1; i < cp.getSize(); i++) {
+            if (cp.getTag(i) == ConstPool.CONST_Class) {
+                // Constant-pool stores the internal form; make sure it’s dot-notation before comparing.
+                String internal = cp.getClassInfo(i);          // e.g. "org.springframework.jdbc.core.JdbcTemplate"
+                String dotName  = internal.replace('/', '.');  // just in case slash form appears
+
+                if (JDBC_PREPARED.equals(dotName) ||
+                        JDBC_CALLATBLE.equals(dotName) ||
+                        dotName.endsWith(".PreparedStatement") ||
+                        dotName.endsWith(".CallableStatement")) {
+                    return false;              // relevant Spring reference found → KEEP processing
+                }
+            }
+        }
+        return true;                           // no match → skip this class
+    }
+}
+------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------
+File Path: main/resources/META-INF/services/org.madladlabs.classz.spi.IExtractor
+File Content:
+org.madladlabs.classz.extractors.PreparedStmtExtractor
+org.madladlabs.classz.extractors.HibernateIntFieldExtractor
+org.madladlabs.classz.extractors.JdbcTemplateIntExtractor
+------------------------------------------------------------------------------------------

@@ -1,0 +1,3 @@
+org.madladlabs.classz.extractors.PreparedStmtExtractor
+org.madladlabs.classz.extractors.HibernateIntFieldExtractor
+org.madladlabs.classz.extractors.JdbcTemplateIntExtractor
