@@ -15,6 +15,42 @@ public class ClassExtractor {
     private static final Logger logger = LogManager.getLogger(ClassExtractor.class);
 
 
+    /**
+     * Turns an artifact name like
+     *     lib/com.example.something.war
+     * into
+     *     lib/com/example/something.war
+     *
+     * Only the dots that are part of the **file name** (not the extension)
+     * are replaced with “/”.  It supports .jar, .war​, and .ear files and leaves
+     * everything else untouched.
+     */
+    public static String dotPkgToPath(String artifact) {
+        // Position of the last “.” in the whole string
+        int lastDot = artifact.lastIndexOf('.');
+        if (lastDot == -1) {                 // no extension => nothing to change
+            return artifact;
+        }
+
+        String ext = artifact.substring(lastDot + 1);   // jar | war | ear | …
+        if (!ext.equals("jar") && !ext.equals("war") && !ext.equals("ear")) {
+            return artifact;                 // unknown suffix – leave as‑is
+        }
+
+        // Split the path at the last “/”
+        int lastSlash = artifact.lastIndexOf('/');
+        String dir  = (lastSlash == -1) ? "" : artifact.substring(0, lastSlash + 1);
+        String name = (lastSlash == -1)
+                ? artifact.substring(0, lastDot)
+                : artifact.substring(lastSlash + 1, lastDot);
+
+        // Replace dots in the *name* part only
+        String converted = name.replace('.', '/');
+
+        return dir + converted + artifact.substring(lastDot);  // add extension back
+    }
+
+
 
     public static void extractFromFile(File file, File outputDir) throws IOException {
         String name = file.getName().toLowerCase();
@@ -29,7 +65,10 @@ public class ClassExtractor {
                         if (entryName.endsWith(".class")) {
                             saveEntry(jarFile.getInputStream(entry), new File(outputDir, entryName));
                         } else if (entryName.endsWith(".jar") || entryName.endsWith(".war") || entryName.endsWith(".ear")) {
-                            String suffixString = entryName.substring(entryName.lastIndexOf(File.separator) + 1);
+                            logger.info("processing entry: "+ entryName);
+                            String newName = dotPkgToPath(entryName);
+                            logger.info("converted entry name: "+ newName);
+                            String suffixString = entryName.substring(newName.lastIndexOf(File.separator) + 1);
                             File tempFile = File.createTempFile("nested", "."+suffixString);//".zip");
                             tempFile.deleteOnExit();
                             saveEntry(jarFile.getInputStream(entry), tempFile);
