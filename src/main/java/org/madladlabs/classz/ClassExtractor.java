@@ -7,6 +7,9 @@ import org.apache.logging.log4j.Logger;
 
 import java.io.*;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Random;
 import java.util.jar.JarFile;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -15,46 +18,56 @@ public class ClassExtractor {
     private static final Logger logger = LogManager.getLogger(ClassExtractor.class);
 
 
+
     /**
-     * Turns an artifact name like
+     * Converts an archive entry such as
      *     lib/com.example.something.war
-     * into
-     *     lib/com/example/something.war
+     * to a host-path like
+     *     lib/com/example/something.war  (on *nix)
+     *     lib\com\example\something.war  (on Windows)
      *
-     * Only the dots that are part of the **file name** (not the extension)
-     * are replaced with “/”.  It supports .jar, .war​, and .ear files and leaves
-     * everything else untouched.
+     *  • Inside the entry we look for .jar / .war / .ear (case-insensitive).
+     *  • Dots that come *before* the extension become the platform separator.
+     *  • Any '/' already present in the entry is also mapped to the host
+     *    separator, so nested archive directories are preserved.
      */
-    public static String dotPkgToPath(String artifact) {
-        // Position of the last “.” in the whole string
-        int lastDot = artifact.lastIndexOf('.');
-        if (lastDot == -1) {                 // no extension => nothing to change
-            return artifact;
+    public static Path toHostPath(String entryName) {
+        if (entryName == null || entryName.isEmpty()) {
+            throw new IllegalArgumentException("entryName must not be null/empty");
         }
 
-        String ext = artifact.substring(lastDot + 1);   // jar | war | ear | …
-        if (!ext.equals("jar") && !ext.equals("war") && !ext.equals("ear")) {
-            return artifact;                 // unknown suffix – leave as‑is
+        // Normalise the entry to a forward-slash path first (JAR spec)
+        String normalized = entryName.replace('\\', '/');
+
+        int lastDot   = normalized.lastIndexOf('.');
+        int lastSlash = normalized.lastIndexOf('/');
+
+        if (lastDot == -1 || lastDot <= lastSlash) {
+            // no recognised extension – map archive path dirs to host dirs verbatim
+            return Paths.get(normalized.replace('/', java.io.File.separatorChar));
         }
 
-        // Split the path at the last “/”
-        int lastSlash = artifact.lastIndexOf('/');
-        String dir  = (lastSlash == -1) ? "" : artifact.substring(0, lastSlash + 1);
-        String name = (lastSlash == -1)
-                ? artifact.substring(0, lastDot)
-                : artifact.substring(lastSlash + 1, lastDot);
+        String ext = normalized.substring(lastDot + 1).toLowerCase();
+        if (!(ext.equals("jar") || ext.equals("war") || ext.equals("ear"))) {
+            // we only rewrite if it’s one of the three known container types
+            return Paths.get(normalized.replace('/', java.io.File.separatorChar));
+        }
 
-        // Replace dots in the *name* part only
-        String converted = name.replace('.', '/');
+        String dirPart   = (lastSlash == -1) ? "" : normalized.substring(0, lastSlash);
+        String namePart  = normalized.substring(lastSlash + 1, lastDot); // no slash, no dot-ext
+        String converted = namePart.replace('.', '/');                   // dots → archive slash
 
-        return dir + converted + artifact.substring(lastDot);  // add extension back
+        // Build the archive-style path (still using '/'), then convert to host separators.
+        String archiveStyle =
+                (dirPart.isEmpty() ? "" : dirPart + '/') + converted + '.' + ext;
+
+        return Paths.get(archiveStyle.replace('/', java.io.File.separatorChar));
     }
-
 
 
     public static void extractFromFile(File file, File outputDir) throws IOException {
         String name = file.getName().toLowerCase();
-
+        Random random = new Random();
         if (name.endsWith(".jar") || name.endsWith(".war") || name.endsWith(".ear") || name.endsWith(".zip")) {
             try (JarFile jarFile = new JarFile(file)) {
                 jarFile.stream().forEach(entry -> {
@@ -66,10 +79,11 @@ public class ClassExtractor {
                             saveEntry(jarFile.getInputStream(entry), new File(outputDir, entryName));
                         } else if (entryName.endsWith(".jar") || entryName.endsWith(".war") || entryName.endsWith(".ear")) {
                             logger.info("processing entry: "+ entryName);
-                            String newName = dotPkgToPath(entryName);
+                            String newName = toHostPath(entryName).toString();
+
                             logger.info("converted entry name: "+ newName);
-                            String suffixString = entryName.substring(newName.lastIndexOf(File.separator) + 1);
-                            File tempFile = File.createTempFile("nested", "."+suffixString);//".zip");
+                            String suffixString = newName.substring(newName.lastIndexOf(File.separator) + 1);
+                            File tempFile = File.createTempFile(Integer.toString(random.nextInt()), suffixString);//".zip");
                             tempFile.deleteOnExit();
                             saveEntry(jarFile.getInputStream(entry), tempFile);
                             extractFromFile(tempFile, outputDir);
